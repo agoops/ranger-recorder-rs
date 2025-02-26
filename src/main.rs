@@ -1,14 +1,12 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound;
-use std::fs::File;
-use std::io::Write;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use std::fs; // Add this import for directory creation
 use chrono::Local;
 
 const THRESHOLD: f32 = 0.05; // Adjust sensitivity for bark detection
-const MIN_BARK_DURATION: Duration = Duration::from_secs(1);
+const MIN_BARK_DURATION: Duration = Duration::from_secs(5); // This is now the silence duration before stopping
 
 fn main() {
     let host = cpal::default_host();
@@ -38,7 +36,7 @@ fn main() {
                     // Create barks directory if it doesn't exist
                     fs::create_dir_all("barks").expect("Failed to create barks directory");
                     
-                    let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+                    let timestamp = Local::now().format("%Y%m%d_%I_%M_%S_%P");
                     let filename = format!("barks/bark_{}.wav", timestamp);
                     println!("Started recording: {}", filename);
                     let spec = hound::WavSpec {
@@ -48,6 +46,9 @@ fn main() {
                         sample_format: hound::SampleFormat::Int,
                     };
                     writer = Some(hound::WavWriter::create(filename, spec).unwrap());
+                } else {
+                    // Reset the timer when we hear another bark
+                    *last_bark = Some(now);
                 }
             }
             
@@ -58,6 +59,7 @@ fn main() {
                         w.write_sample(scaled_sample).unwrap();
                     }
                 }
+                // Only stop recording if we haven't heard a bark for MIN_BARK_DURATION
                 if last_bark.unwrap().elapsed() > MIN_BARK_DURATION {
                     *is_recording = false;
                     writer = None;

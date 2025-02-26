@@ -2,16 +2,21 @@ use eframe::egui;
 use chrono::{NaiveDateTime, Local, TimeZone};
 use std::path::PathBuf;
 use walkdir::WalkDir;
+use rodio::{Decoder, OutputStream, Sink};
+use std::fs::File;
+use std::io::BufReader;
+
+#[derive(Clone)]
+struct Recording {
+    timestamp: chrono::DateTime<Local>,
+    path: PathBuf,
+}
 
 struct BarkViewer {
     recordings: Vec<Recording>,
     timeline_start: chrono::DateTime<Local>,
     timeline_end: chrono::DateTime<Local>,
-}
-
-struct Recording {
-    timestamp: chrono::DateTime<Local>,
-    path: PathBuf,
+    current_playback: Option<Sink>,
 }
 
 impl BarkViewer {
@@ -55,6 +60,29 @@ impl BarkViewer {
             recordings,
             timeline_start,
             timeline_end,
+            current_playback: None,
+        }
+    }
+
+    fn play_audio(&mut self, path: &PathBuf) {
+        // Stop any existing playback
+        if let Some(sink) = &self.current_playback {
+            sink.stop();
+        }
+
+        // Set up audio playback
+        if let Ok((stream, stream_handle)) = OutputStream::try_default() {
+            if let Ok(file) = File::open(path) {
+                let buf_reader = BufReader::new(file);
+                if let Ok(source) = Decoder::new(buf_reader) {
+                    let sink = Sink::try_new(&stream_handle).unwrap();
+                    sink.append(source);
+                    self.current_playback = Some(sink);
+                    
+                    // Keep stream alive
+                    std::mem::forget(stream);
+                }
+            }
         }
     }
 }
@@ -145,12 +173,19 @@ impl eframe::App for BarkViewer {
 
             // Show recording list
             ui.heading("Recordings");
-            for recording in &self.recordings {
+            let recordings_ui = self.recordings.clone();
+            for recording in &recordings_ui {
+                let path = recording.path.clone();
                 ui.horizontal(|ui| {
                     ui.label(recording.timestamp.format("%Y-%m-%d %I:%M:%S %p").to_string());
                     if ui.button("Play").clicked() {
-                        // TODO: Implement audio playback
-                        println!("Would play: {:?}", recording.path);
+                        self.play_audio(&path);
+                    }
+                    if let Some(sink) = &self.current_playback {
+                        if ui.button("Stop").clicked() {
+                            sink.stop();
+                            self.current_playback = None;
+                        }
                     }
                 });
             }

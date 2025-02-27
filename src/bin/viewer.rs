@@ -5,11 +5,13 @@ use walkdir::WalkDir;
 use rodio::{Decoder, OutputStream, Sink};
 use std::fs::File;
 use std::io::BufReader;
+use hound;
 
 #[derive(Clone)]
 struct Recording {
     timestamp: chrono::DateTime<Local>,
     path: PathBuf,
+    duration: f32,  // duration in seconds
 }
 
 struct BarkViewer {
@@ -31,17 +33,20 @@ impl BarkViewer {
         {
             if let Some(filename) = entry.path().file_name().and_then(|f| f.to_str()) {
                 if filename.starts_with("bark_") {
-                    // Parse timestamp from filename (format: bark_YYYYMMDD_H_MM_SS_pm.wav)
-                    let timestamp_str = filename.strip_prefix("bark_").unwrap()
-                        .strip_suffix(".wav").unwrap();
-                    if let Ok(timestamp) = NaiveDateTime::parse_from_str(
-                        timestamp_str,
-                        "%Y%m%d_%I_%M_%S_%P"
-                    ) {
-                        recordings.push(Recording {
-                            timestamp: Local.from_local_datetime(&timestamp).unwrap(),
-                            path: entry.path().to_owned(),
-                        });
+                    if let Ok(reader) = hound::WavReader::open(entry.path()) {
+                        let spec = reader.spec();
+                        let duration = reader.duration() as f32 / spec.sample_rate as f32;
+                        
+                        if let Ok(timestamp) = NaiveDateTime::parse_from_str(
+                            filename.strip_prefix("bark_").unwrap().strip_suffix(".wav").unwrap(),
+                            "%Y%m%d_%I_%M_%S_%P"
+                        ) {
+                            recordings.push(Recording {
+                                timestamp: Local.from_local_datetime(&timestamp).unwrap(),
+                                path: entry.path().to_owned(),
+                                duration,
+                            });
+                        }
                     }
                 }
             }
@@ -50,11 +55,16 @@ impl BarkViewer {
         // Sort recordings by timestamp
         recordings.sort_by_key(|r| r.timestamp);
 
-        // Set timeline range
-        let timeline_start = recordings.first()
-            .map(|r| r.timestamp - chrono::Duration::minutes(5))
-            .unwrap_or_else(|| Local::now() - chrono::Duration::hours(24));
-        let timeline_end = Local::now();
+        // Set timeline range to start at beginning of current day
+        let now = Local::now();
+        let today_start = now.date().and_hms_opt(0, 0, 0).unwrap();
+        
+        // Find first recording of today
+        let timeline_start = recordings.iter()
+            .find(|r| r.timestamp.date() == now.date())
+            .map(|r| r.timestamp - chrono::Duration::minutes(20))
+            .unwrap_or(today_start);
+        let timeline_end = now;
 
         Self {
             recordings,
@@ -171,13 +181,28 @@ impl eframe::App for BarkViewer {
                 }
             }
 
-            // Show recording list
+            // Show recording list grouped by day
             ui.heading("Recordings");
-            let recordings_ui = self.recordings.clone();
+            let mut recordings_ui = self.recordings.clone();
+            recordings_ui.reverse(); // Reverse the order to show newest first
+            
+            // Group recordings by day
+            let mut current_day: Option<chrono::Date<Local>> = None;
             for recording in &recordings_ui {
+                let recording_day = recording.timestamp.date();
+                
+                // Add day header when we encounter a new day
+                if current_day != Some(recording_day) {
+                    current_day = Some(recording_day);
+                    ui.heading(recording_day.format("%A, %B %d, %Y").to_string());
+                }
+
                 let path = recording.path.clone();
                 ui.horizontal(|ui| {
-                    ui.label(recording.timestamp.format("%Y-%m-%d %I:%M:%S %p").to_string());
+                    ui.label(format!("{} ({:.1}s)", 
+                        recording.timestamp.format("%I:%M:%S %p"),
+                        recording.duration
+                    ));
                     if ui.button("Play").clicked() {
                         self.play_audio(&path);
                     }

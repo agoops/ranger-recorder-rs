@@ -73,5 +73,5 @@ fn main() {
 
     stream.play().expect("Failed to start stream");
     println!("Listening for barks...");
-    std::thread::sleep(Duration::from_secs(60 * 60)); // Run for an hour
+    std::thread::sleep(Duration::from_secs(120 * 60)); // Run for an hour
 }

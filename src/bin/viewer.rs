@@ -19,6 +19,7 @@ struct BarkViewer {
     timeline_start: chrono::DateTime<Local>,
     timeline_end: chrono::DateTime<Local>,
     current_playback: Option<Sink>,
+    scroll_delta: f32,  // Add scroll tracking
 }
 
 impl BarkViewer {
@@ -71,6 +72,7 @@ impl BarkViewer {
             timeline_start,
             timeline_end,
             current_playback: None,
+            scroll_delta: 0.0,
         }
     }
 
@@ -127,59 +129,127 @@ impl eframe::App for BarkViewer {
                 }
             });
 
-            // Timeline visualization
-            let timeline_height = 100.0;
-            let available_width = ui.available_width();
-            
-            let (response, painter) = ui.allocate_painter(
-                egui::vec2(available_width, timeline_height),
-                egui::Sense::hover(),
-            );
-
-            let rect = response.rect;
-            
-            // Draw timeline background
-            painter.rect_filled(rect, 0.0, egui::Color32::from_gray(32));
-
-            // Draw time markers every 15 minutes
-            let duration = self.timeline_end.signed_duration_since(self.timeline_start);
-            let minutes = duration.num_minutes();
-            let intervals = minutes / 15;
-            
-            for interval in 0..=intervals {
-                let x = rect.left() + (interval as f32 / intervals as f32) * rect.width();
-                painter.line_segment(
-                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(64)),
-                );
-                
-                // Add time label
-                let time = self.timeline_start + chrono::Duration::minutes(interval * 15);
-                let time_str = time.format("%I:%M %p").to_string();
-                painter.text(
-                    egui::pos2(x, rect.bottom() - 15.0),
-                    egui::Align2::CENTER_CENTER,
-                    time_str,
-                    egui::FontId::default(),
-                    egui::Color32::from_gray(200),
-                );
-            }
-
-            // Draw recordings as markers
-            for recording in &self.recordings {
-                if recording.timestamp >= self.timeline_start && recording.timestamp <= self.timeline_end {
-                    let progress = recording.timestamp.signed_duration_since(self.timeline_start).num_seconds() as f32
-                        / duration.num_seconds() as f32;
-                    let x = rect.left() + progress * rect.width();
+            // Add side-by-side layout for timeline and zoom slider
+            ui.horizontal(|ui| {
+                // Timeline area (taking most of the space)
+                ui.vertical(|ui| {
+                    let timeline_height = 100.0;
+                    let available_width = ui.available_width() - 30.0; // Reserve space for slider
                     
-                    // Draw bark marker
-                    painter.circle_filled(
-                        egui::pos2(x, rect.center().y),
-                        5.0,
-                        egui::Color32::from_rgb(255, 128, 0),
+                    let (response, painter) = ui.allocate_painter(
+                        egui::vec2(available_width, timeline_height),
+                        egui::Sense::click_and_drag(),
                     );
-                }
-            }
+
+                    let rect = response.rect;
+                    
+                    // Handle scrolling and zooming
+                    if response.hovered() {
+                        // Zoom with Ctrl + Scroll
+                        if ctx.input(|i| i.modifiers.ctrl) {
+                            let scroll_delta = ctx.input(|i| i.raw_scroll_delta.y);
+                            if scroll_delta != 0.0 {
+                                let zoom_center = response.hover_pos().unwrap().x / rect.width();
+                                let zoom_factor = if scroll_delta > 0.0 { 1.25 } else { 0.8 };
+                                
+                                let center_time = self.timeline_start + chrono::Duration::seconds(
+                                    (self.timeline_end.timestamp() - self.timeline_start.timestamp()) as i64 * zoom_center as i64 / 100
+                                );
+                                
+                                let new_duration = chrono::Duration::seconds(
+                                    ((self.timeline_end.timestamp() - self.timeline_start.timestamp()) as f32 * zoom_factor) as i64
+                                );
+                                
+                                self.timeline_start = center_time - (new_duration / 2);
+                                self.timeline_end = center_time + (new_duration / 2);
+                            }
+                        } else {
+                            // Pan with scroll or drag
+                            let scroll_delta = ctx.input(|i| i.raw_scroll_delta.x);
+                            let drag_delta = response.drag_delta().x;
+                            let total_delta = scroll_delta + drag_delta;
+                            
+                            if total_delta != 0.0 {
+                                let time_width = self.timeline_end.timestamp() - self.timeline_start.timestamp();
+                                let delta_time = (total_delta / rect.width()) * time_width as f32;
+                                let duration = chrono::Duration::seconds(-delta_time as i64);
+                                self.timeline_start += duration;
+                                self.timeline_end += duration;
+                            }
+                        }
+                    }
+
+                    // Draw timeline background
+                    painter.rect_filled(rect, 0.0, egui::Color32::from_gray(32));
+
+                    // Calculate appropriate time interval based on duration
+                    let duration_mins = (self.timeline_end.timestamp() - self.timeline_start.timestamp()) as f64 / 60.0;
+                    let interval_mins = if duration_mins <= 15.0 { 1 }
+                        else if duration_mins <= 60.0 { 5 }
+                        else if duration_mins <= 180.0 { 15 }
+                        else if duration_mins <= 720.0 { 30 }
+                        else { 60 };
+
+                    // Draw time markers with adaptive intervals
+                    let start_mins = self.timeline_start.timestamp() / 60;
+                    let end_mins = self.timeline_end.timestamp() / 60;
+                    let total_mins = end_mins - start_mins;
+                    
+                    for mins in (start_mins..=end_mins).step_by(interval_mins as usize) {
+                        let progress = (mins - start_mins) as f32 / total_mins as f32;
+                        let x = rect.left() + progress * rect.width();
+                        
+                        painter.line_segment(
+                            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(64)),
+                        );
+                        
+                        let time = Local.timestamp_opt(mins * 60, 0).unwrap();
+                        let time_str = time.format("%I:%M %p").to_string();
+                        painter.text(
+                            egui::pos2(x, rect.bottom() - 15.0),
+                            egui::Align2::CENTER_CENTER,
+                            time_str,
+                            egui::FontId::default(),
+                            egui::Color32::from_gray(200),
+                        );
+                    }
+
+                    // Draw recordings
+                    for recording in &self.recordings {
+                        if recording.timestamp >= self.timeline_start && recording.timestamp <= self.timeline_end {
+                            let progress = (recording.timestamp.timestamp() - self.timeline_start.timestamp()) as f32
+                                / (self.timeline_end.timestamp() - self.timeline_start.timestamp()) as f32;
+                            let x = rect.left() + progress * rect.width();
+                            
+                            painter.circle_filled(
+                                egui::pos2(x, rect.center().y),
+                                5.0,
+                                egui::Color32::from_rgb(255, 128, 0),
+                            );
+                        }
+                    }
+                });
+
+                // Vertical zoom slider
+                ui.vertical(|ui| {
+                    let duration = self.timeline_end.timestamp() - self.timeline_start.timestamp();
+                    let mut zoom_value = (duration as f32 / 3600.0).log10(); // Convert to log scale
+                    
+                    if ui.add(egui::Slider::new(&mut zoom_value, -1.0..=2.0)
+                        .orientation(egui::SliderOrientation::Vertical)
+                        .text("Zoom"))
+                        .changed() 
+                    {
+                        let new_duration = (10.0f32.powf(zoom_value) * 3600.0) as i64;
+                        let center_time = self.timeline_start.timestamp() + (duration / 2);
+                        let half_new_duration = new_duration / 2;
+                        
+                        self.timeline_start = Local.timestamp_opt(center_time - half_new_duration, 0).unwrap();
+                        self.timeline_end = Local.timestamp_opt(center_time + half_new_duration, 0).unwrap();
+                    }
+                });
+            });
 
             // Show recording list grouped by day
             ui.heading("Recordings");

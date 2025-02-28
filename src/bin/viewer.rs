@@ -294,37 +294,54 @@ impl eframe::App for BarkViewer {
                         );
                     }
 
-                    // Calculate appropriate time interval based on duration
+                    // Calculate appropriate time interval based on duration and available width
                     let duration_mins = (self.timeline_end.timestamp() - self.timeline_start.timestamp()) as f64 / 60.0;
-                    let interval_mins = if duration_mins <= 15.0 { 1 }
-                        else if duration_mins <= 60.0 { 5 }
-                        else if duration_mins <= 180.0 { 15 }
-                        else if duration_mins <= 720.0 { 30 }
-                        else { 60 };
-
-                    // Draw time markers with adaptive intervals
-                    let start_mins = self.timeline_start.timestamp() / 60;
-                    let end_mins = self.timeline_end.timestamp() / 60;
-                    let total_mins = end_mins - start_mins;
+                    let available_width = rect.width();
                     
+                    // Assume each timestamp needs about 80 pixels of space to be readable
+                    let min_pixels_per_label = 80.0;
+                    let max_labels = (available_width / min_pixels_per_label).floor() as i64;
+                    
+                    // Calculate interval to show at most max_labels timestamps
+                    let interval_mins = {
+                        let raw_interval = ((duration_mins / max_labels as f64).ceil() as i64).max(15);
+                        // Round up to next multiple of 15
+                        ((raw_interval + 14) / 15) * 15
+                    };
+                    
+                    // Round start time down to the interval
+                    let start_mins = (self.timeline_start.timestamp() / 60 / interval_mins) * interval_mins;
+                    let end_mins = self.timeline_end.timestamp() / 60;
+                    
+                    // Draw time markers with calculated interval
                     for mins in (start_mins..=end_mins).step_by(interval_mins as usize) {
-                        let progress = (mins - start_mins) as f32 / total_mins as f32;
+                        let progress = (mins * 60 - self.timeline_start.timestamp()) as f32
+                            / (self.timeline_end.timestamp() - self.timeline_start.timestamp()) as f32;
                         let x = rect.left() + progress * rect.width();
                         
-                        painter.line_segment(
-                            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(64)),
-                        );
-                        
-                        let time = Local.timestamp_opt(mins * 60, 0).unwrap();
-                        let time_str = time.format("%I:%M %p").to_string();
-                        painter.text(
-                            egui::pos2(x, rect.bottom() - 15.0),
-                            egui::Align2::CENTER_CENTER,
-                            time_str,
-                            egui::FontId::default(),
-                            egui::Color32::from_gray(200),
-                        );
+                        // Only draw if within bounds
+                        if x >= rect.left() && x <= rect.right() {
+                            painter.line_segment(
+                                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(64)),
+                            );
+                            
+                            let time = Local.timestamp_opt(mins * 60, 0).unwrap();
+                            // Show date if interval is 24 hours or more
+                            let time_str = if interval_mins >= 24 * 60 {
+                                time.format("%b %d\n%I:%M %p").to_string()
+                            } else {
+                                time.format("%I:%M %p").to_string()
+                            };
+                            
+                            painter.text(
+                                egui::pos2(x, rect.bottom() - 15.0),
+                                egui::Align2::CENTER_CENTER,
+                                time_str,
+                                egui::FontId::default(),
+                                egui::Color32::from_gray(200),
+                            );
+                        }
                     }
 
                     // Draw recordings as box plots using cached data
@@ -438,19 +455,16 @@ impl eframe::App for BarkViewer {
                 }
 
                 let path = recording.path.clone();
-                let timestamp = recording.timestamp;
+                let timestamp = recording.timestamp;  // Clone timestamp for hover state
                 ui.horizontal(|ui| {
                     ui.label(format!("{} ({:.1}s)", 
                         recording.timestamp.format("%I:%M:%S %p"),
                         recording.duration
                     ));
                     let play_button = ui.button("Play");
-                    // Only track hover state
-                    self.hovered_timestamp = if play_button.hovered() {
-                        Some(timestamp)
-                    } else {
-                        self.hovered_timestamp
-                    };
+                    if play_button.hovered() {
+                        self.hovered_timestamp = Some(timestamp);
+                    }
                     if play_button.clicked() {
                         self.play_audio(&path);
                     }

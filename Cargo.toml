@@ -2,6 +2,15 @@
 name = "ranger-recorder-rs"
 version = "0.1.0"
 edition = "2024"
+default-run = "ranger-recorder-rs"
+
+[[bin]]
+name = "ranger-recorder-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "viewer"
+path = "src/bin/viewer.rs"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

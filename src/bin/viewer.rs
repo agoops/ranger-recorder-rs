@@ -270,8 +270,8 @@ impl eframe::App for BarkViewer {
                     );
 
                     // Draw percentage markers with adjusted scale
-                    for i in 0..=10 {
-                        let percentage = i as f32 * 10.0;
+                    for i in 0..=4 {  // Changed to 5 steps (0,1,2,3,4)
+                        let percentage = i as f32 * 25.0;  // Changed to 25% intervals
                         let y = rect.bottom() - (percentage / 100.0) * rect.height();
                         
                         // Draw horizontal grid line

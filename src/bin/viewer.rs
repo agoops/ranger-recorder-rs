@@ -12,6 +12,8 @@ struct Recording {
     timestamp: chrono::DateTime<Local>,
     path: PathBuf,
     duration: f32,  // duration in seconds
+    audio_stats: Option<(f32, f32, f32, f32, f32)>, // min, q1, median, q3, max
+    waveform: Vec<f32>,
 }
 
 struct BarkViewer {
@@ -20,6 +22,34 @@ struct BarkViewer {
     timeline_end: chrono::DateTime<Local>,
     current_playback: Option<Sink>,
     scroll_delta: f32,  // Add scroll tracking
+    hovered_timestamp: Option<chrono::DateTime<Local>>,  // Add this field
+}
+
+impl Recording {
+    fn analyze_audio(&self) -> Option<(f32, f32, f32, f32, f32)> { // min, 25%, median, 75%, max
+        if let Ok(reader) = hound::WavReader::open(&self.path) {
+            let samples: Vec<f32> = reader.into_samples()
+                .filter_map(|s| s.ok())
+                .map(|s: i16| s as f32 / i16::MAX as f32)
+                .map(|s| s.abs())
+                .collect();
+            
+            if !samples.is_empty() {
+                let mut sorted = samples.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                
+                let len = sorted.len();
+                let min = sorted[0];
+                let q1 = sorted[len / 4];
+                let median = sorted[len / 2];
+                let q3 = sorted[3 * len / 4];
+                let max = sorted[len - 1];
+                
+                return Some((min, q1, median, q3, max));
+            }
+        }
+        None
+    }
 }
 
 impl BarkViewer {
@@ -38,6 +68,31 @@ impl BarkViewer {
                         let spec = reader.spec();
                         let duration = reader.duration() as f32 / spec.sample_rate as f32;
                         
+                        // Analyze audio data during loading
+                        let audio_stats = {
+                            let samples: Vec<f32> = reader.into_samples()
+                                .filter_map(|s| s.ok())
+                                .map(|s: i16| s as f32 / i16::MAX as f32)
+                                .map(|s| s.abs())
+                                .collect();
+                            
+                            if !samples.is_empty() {
+                                let mut sorted = samples;
+                                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                
+                                let len = sorted.len();
+                                let min = sorted[0];
+                                let q1 = sorted[len / 4];
+                                let median = sorted[len / 2];
+                                let q3 = sorted[3 * len / 4];
+                                let max = sorted[len - 1];
+                                
+                                Some((min, q1, median, q3, max))
+                            } else {
+                                None
+                            }
+                        };
+                        
                         if let Ok(timestamp) = NaiveDateTime::parse_from_str(
                             filename.strip_prefix("bark_").unwrap().strip_suffix(".wav").unwrap(),
                             "%Y%m%d_%I_%M_%S_%P"
@@ -46,6 +101,8 @@ impl BarkViewer {
                                 timestamp: Local.from_local_datetime(&timestamp).unwrap(),
                                 path: entry.path().to_owned(),
                                 duration,
+                                audio_stats,
+                                waveform: Vec::new(),
                             });
                         }
                     }
@@ -58,11 +115,13 @@ impl BarkViewer {
 
         // Set timeline range to start at beginning of current day
         let now = Local::now();
-        let today_start = now.date().and_hms_opt(0, 0, 0).unwrap();
+        let today_start = Local.from_local_datetime(
+            &now.date_naive().and_hms_opt(0, 0, 0).unwrap()
+        ).unwrap();
         
         // Find first recording of today
         let timeline_start = recordings.iter()
-            .find(|r| r.timestamp.date() == now.date())
+            .find(|r| r.timestamp.date_naive() == now.date_naive())
             .map(|r| r.timestamp - chrono::Duration::minutes(20))
             .unwrap_or(today_start);
         let timeline_end = now;
@@ -73,6 +132,7 @@ impl BarkViewer {
             timeline_end,
             current_playback: None,
             scroll_delta: 0.0,
+            hovered_timestamp: None,  // Initialize new field
         }
     }
 
@@ -179,8 +239,60 @@ impl eframe::App for BarkViewer {
                         }
                     }
 
-                    // Draw timeline background
+                    // Draw timeline background and y-axis
                     painter.rect_filled(rect, 0.0, egui::Color32::from_gray(32));
+
+                    // Find the maximum value among visible recordings
+                    let max_visible_value = self.recordings.iter()
+                        .filter(|r| r.timestamp >= self.timeline_start && r.timestamp <= self.timeline_end)
+                        .filter_map(|r| r.audio_stats)
+                        .map(|(_, _, _, _, max)| max)
+                        .fold(0.0f32, f32::max);
+
+                    // Scale to make the largest value take up 80% of the height
+                    let scale_factor = if max_visible_value > 0.0 {
+                        0.8 / max_visible_value
+                    } else {
+                        1.0
+                    };
+
+                    // Draw y-axis with percentage markers
+                    let y_axis_width = 40.0;
+                    let plot_rect = rect.shrink2(egui::vec2(y_axis_width, 0.0));
+                    
+                    // Draw y-axis line
+                    painter.line_segment(
+                        [
+                            egui::pos2(rect.left() + y_axis_width, rect.top()),
+                            egui::pos2(rect.left() + y_axis_width, rect.bottom())
+                        ],
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(128)),
+                    );
+
+                    // Draw percentage markers with adjusted scale
+                    for i in 0..=10 {
+                        let percentage = i as f32 * 10.0;
+                        let y = rect.bottom() - (percentage / 100.0) * rect.height();
+                        
+                        // Draw horizontal grid line
+                        painter.line_segment(
+                            [
+                                egui::pos2(rect.left() + y_axis_width, y),
+                                egui::pos2(rect.right(), y)
+                            ],
+                            egui::Stroke::new(0.5, egui::Color32::from_gray(64)),
+                        );
+                        
+                        // Draw value label (actual amplitude percentage)
+                        let actual_value = (percentage / 100.0 / scale_factor * 100.0).round();
+                        painter.text(
+                            egui::pos2(rect.left() + y_axis_width - 5.0, y),
+                            egui::Align2::RIGHT_CENTER,
+                            format!("{}%", actual_value),
+                            egui::FontId::default(),
+                            egui::Color32::from_gray(200),
+                        );
+                    }
 
                     // Calculate appropriate time interval based on duration
                     let duration_mins = (self.timeline_end.timestamp() - self.timeline_start.timestamp()) as f64 / 60.0;
@@ -215,18 +327,76 @@ impl eframe::App for BarkViewer {
                         );
                     }
 
-                    // Draw recordings
+                    // Draw recordings as box plots using cached data
                     for recording in &self.recordings {
                         if recording.timestamp >= self.timeline_start && recording.timestamp <= self.timeline_end {
                             let progress = (recording.timestamp.timestamp() - self.timeline_start.timestamp()) as f32
                                 / (self.timeline_end.timestamp() - self.timeline_start.timestamp()) as f32;
-                            let x = rect.left() + progress * rect.width();
+                            let x = plot_rect.left() + progress * plot_rect.width();
                             
-                            painter.circle_filled(
-                                egui::pos2(x, rect.center().y),
-                                5.0,
-                                egui::Color32::from_rgb(255, 128, 0),
-                            );
+                            if let Some((min, q1, median, q3, max)) = recording.audio_stats {
+                                let box_width = 15.0;
+                                let whisker_width = box_width / 2.0;
+                                let y_base = plot_rect.bottom();
+                                
+                                // Choose color based on hover state only
+                                let color = if Some(recording.timestamp) == self.hovered_timestamp {
+                                    egui::Color32::from_rgb(255, 200, 0)  // Brighter orange when hovered
+                                } else {
+                                    egui::Color32::from_rgb(255, 128, 0)  // Normal orange
+                                };
+                                
+                                // Draw vertical whisker lines
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(x, y_base - plot_rect.height() * min),
+                                        egui::pos2(x, y_base - plot_rect.height() * q1)
+                                    ],
+                                    egui::Stroke::new(1.0, color),
+                                );
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(x, y_base - plot_rect.height() * q3),
+                                        egui::pos2(x, y_base - plot_rect.height() * max)
+                                    ],
+                                    egui::Stroke::new(1.0, color),
+                                );
+                                
+                                // Draw horizontal whisker caps
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(x - whisker_width/2.0, y_base - plot_rect.height() * min),
+                                        egui::pos2(x + whisker_width/2.0, y_base - plot_rect.height() * min)
+                                    ],
+                                    egui::Stroke::new(1.0, color),
+                                );
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(x - whisker_width/2.0, y_base - plot_rect.height() * max),
+                                        egui::pos2(x + whisker_width/2.0, y_base - plot_rect.height() * max)
+                                    ],
+                                    egui::Stroke::new(1.0, color),
+                                );
+                                
+                                // Draw box (IQR)
+                                painter.rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(x - box_width/2.0, y_base - plot_rect.height() * q3),
+                                        egui::pos2(x + box_width/2.0, y_base - plot_rect.height() * q1),
+                                    ),
+                                    0.0,
+                                    color,
+                                );
+                                
+                                // Draw median line
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(x - box_width/2.0, y_base - plot_rect.height() * median),
+                                        egui::pos2(x + box_width/2.0, y_base - plot_rect.height() * median)
+                                    ],
+                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                );
+                            }
                         }
                     }
                 });
@@ -257,9 +427,9 @@ impl eframe::App for BarkViewer {
             recordings_ui.reverse(); // Reverse the order to show newest first
             
             // Group recordings by day
-            let mut current_day: Option<chrono::Date<Local>> = None;
+            let mut current_day: Option<chrono::NaiveDate> = None;
             for recording in &recordings_ui {
-                let recording_day = recording.timestamp.date();
+                let recording_day = recording.timestamp.date_naive();
                 
                 // Add day header when we encounter a new day
                 if current_day != Some(recording_day) {
@@ -268,12 +438,20 @@ impl eframe::App for BarkViewer {
                 }
 
                 let path = recording.path.clone();
+                let timestamp = recording.timestamp;
                 ui.horizontal(|ui| {
                     ui.label(format!("{} ({:.1}s)", 
                         recording.timestamp.format("%I:%M:%S %p"),
                         recording.duration
                     ));
-                    if ui.button("Play").clicked() {
+                    let play_button = ui.button("Play");
+                    // Only track hover state
+                    self.hovered_timestamp = if play_button.hovered() {
+                        Some(timestamp)
+                    } else {
+                        self.hovered_timestamp
+                    };
+                    if play_button.clicked() {
                         self.play_audio(&path);
                     }
                     if let Some(sink) = &self.current_playback {
@@ -283,6 +461,11 @@ impl eframe::App for BarkViewer {
                         }
                     }
                 });
+            }
+
+            // Reset hover state on each frame
+            if !ctx.input(|i| i.pointer.has_pointer()) {
+                self.hovered_timestamp = None;
             }
         });
     }
